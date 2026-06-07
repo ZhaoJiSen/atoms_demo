@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import {
-  Sparkles, Lightbulb, AlertCircle, LogIn
+  Sparkles, Lightbulb, AlertCircle, LogIn, User
 } from '@lucide/vue'
 
 definePageMeta({
@@ -10,7 +10,7 @@ definePageMeta({
 const { t } = useI18n()
 const router = useRouter()
 const { createApp } = useAppsApi()
-const { isAuthenticated, login } = useAuthApi()
+const { isAuthenticated, login, demoLogin } = useAuthApi()
 
 const refreshApps = inject<() => Promise<void>>('refreshApps')
 
@@ -18,6 +18,7 @@ const idea = ref('')
 const creating = ref(false)
 const error = ref<string | null>(null)
 const showLoginDialog = ref(false)
+const loggingIn = ref(false)
 
 const charCount = computed(() => idea.value.length)
 const isValid = computed(() => idea.value.trim().length >= 5)
@@ -31,6 +32,18 @@ const exampleIdeas = computed(() => [
 function handleTextareaClick() {
   if (!isAuthenticated.value) {
     showLoginDialog.value = true
+  }
+}
+
+async function handleDemoLogin() {
+  loggingIn.value = true
+  try {
+    await demoLogin()
+    showLoginDialog.value = false
+  } catch (e) {
+    console.error('Demo login failed:', e)
+  } finally {
+    loggingIn.value = false
   }
 }
 
@@ -140,9 +153,11 @@ function selectExample(text: string) {
             <LogIn class="w-4 h-4 mr-2" />
             {{ t('auth.googleLogin') }}
           </UButton>
-          <UButton @click="showLoginDialog = false" variant="ghost" size="lg" block color="gray">
-            {{ t('common.cancel') }}
+          <UButton @click="handleDemoLogin" color="gray" size="lg" block :loading="loggingIn">
+            <User class="w-4 h-4 mr-2" />
+            {{ t('auth.demoLogin') }}
           </UButton>
+          <p class="text-xs text-zinc-600 text-center">{{ t('auth.demoLoginHint') }}</p>
         </div>
       </div>
     </UModal>
