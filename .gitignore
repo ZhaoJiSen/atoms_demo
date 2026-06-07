@@ -1,0 +1,6 @@
+/target
+.omx/
+.env
+web/.nuxt/
+web/.output/
+web/node_modules/
