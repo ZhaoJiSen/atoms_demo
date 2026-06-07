@@ -161,6 +161,52 @@ pub(crate) async fn logout(
     Ok(response)
 }
 
+pub(crate) async fn demo_login(
+    State(state): State<AppState>,
+) -> ApiResult<impl IntoResponse> {
+    let user = OAuthUser {
+        id: "demo_user".into(),
+        display_name: "Demo User".into(),
+        email: "demo@atoms-demo.local".into(),
+        provider: OAuthProviderSummary {
+            id: "demo".into(),
+            name: "Demo".into(),
+            mode: OAuthProviderMode::Google, // Demo Login fallback, reusing Google mode
+        },
+        created_at: now_iso(),
+    };
+
+    let session_token = random_token("sess");
+
+    if let Some(pool) = &state.db {
+        crate::db::create_session(pool, &session_token, &user).await?;
+    } else {
+        let mut sessions = state
+            .auth_sessions
+            .lock()
+            .map_err(|_| ApiError::Internal("Failed to access auth session state"))?;
+        sessions.insert(session_token.clone(), user.clone());
+    }
+
+    // Set session cookie - reuse existing logic
+    let cookie = session_cookie(&session_token);
+    let session = AuthSession {
+        authenticated: true,
+        provider: user.provider.clone(),
+        user: Some(user),
+        expires_at: None,
+    };
+
+    let mut response = Json(session).into_response();
+    response.headers_mut().append(
+        SET_COOKIE,
+        HeaderValue::from_str(&cookie)
+            .map_err(|_| ApiError::Internal("Failed to set session cookie"))?,
+    );
+
+    Ok(response)
+}
+
 pub(crate) async fn me(
     State(state): State<AppState>,
     headers: HeaderMap,

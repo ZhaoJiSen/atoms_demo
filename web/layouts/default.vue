@@ -6,7 +6,7 @@ import {
 } from '@lucide/vue'
 
 const { t, locale, setLocale, locales } = useI18n()
-const { session, isAuthenticated, loadSession, login, logout } = useAuthApi()
+const { session, isAuthenticated, loadSession, login, logout, demoLogin } = useAuthApi()
 const { request } = useApiRequest()
 
 const showLoginDialog = ref(false)
@@ -15,6 +15,7 @@ const saving = ref(false)
 const testing = ref(false)
 const configured = ref(false)
 const testResult = ref<{ success: boolean; message: string } | null>(null)
+const loggingIn = ref(false)
 
 const settingsForm = ref({
   provider: 'mock' as 'mock' | 'gpt' | 'mimo',
@@ -161,6 +162,18 @@ onMounted(async () => {
     showSettingsDialog.value = true
   })
 })
+
+async function handleDemoLogin() {
+  loggingIn.value = true
+  try {
+    await demoLogin()
+    showLoginDialog.value = false
+  } catch (e: any) {
+    console.error('Demo login failed:', e)
+  } finally {
+    loggingIn.value = false
+  }
+}
 </script>
 
 <template>
@@ -263,9 +276,11 @@ onMounted(async () => {
             <LogIn class="w-4 h-4 mr-2" />
             {{ t('auth.googleLogin') }}
           </UButton>
-          <UButton @click="showLoginDialog = false" variant="ghost" size="lg" block color="gray">
-            {{ t('common.cancel') }}
+          <UButton @click="handleDemoLogin" color="gray" size="lg" block :loading="loggingIn">
+            <User class="w-4 h-4 mr-2" />
+            {{ t('auth.demoLogin') }}
           </UButton>
+          <p class="text-xs text-zinc-600 text-center">{{ t('auth.demoLoginHint') }}</p>
         </div>
       </div>
     </UModal>

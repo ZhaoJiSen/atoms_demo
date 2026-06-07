@@ -54,6 +54,22 @@ export function useAuthApi() {
     }
   }
 
+  async function demoLogin() {
+    loading.value = true
+    error.value = null
+    try {
+      session.value = await request<AuthSession>('/api/auth/demo', {
+        method: 'POST',
+      })
+      return session.value
+    } catch (e: any) {
+      error.value = e?.message || 'Failed to login as demo user'
+      throw e
+    } finally {
+      loading.value = false
+    }
+  }
+
   const isAuthenticated = computed(() => session.value?.authenticated === true)
 
   return {
@@ -64,5 +80,6 @@ export function useAuthApi() {
     loadSession,
     login,
     logout,
+    demoLogin,
   }
 }

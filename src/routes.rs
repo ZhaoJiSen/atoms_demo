@@ -10,7 +10,7 @@ use serde_json::{Value, json};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use crate::{
-    auth::{callback, login, logout, me, require_auth},
+    auth::{callback, demo_login, login, logout, me, require_auth},
     errors::{ApiError, ApiResult},
     init::{complete_init, get_init},
     mock::{
@@ -35,6 +35,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
         .route("/api/auth/callback", get(callback))
         .route("/api/auth/logout", post(logout))
         .route("/api/auth/me", get(me))
+        .route("/api/auth/demo", post(demo_login))
         .route("/api/apps", get(list_apps).post(create_app))
         .route(
             "/api/apps/{id}",
