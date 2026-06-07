@@ -14,6 +14,7 @@ const { t } = useI18n()
 const router = useRouter()
 const route = useRoute()
 const { listApps, updateApp, deleteApp } = useAppsApi()
+const { isAuthenticated } = useAuthApi()
 
 const apps = ref<App[]>([])
 const appsLoading = ref(false)
@@ -21,6 +22,15 @@ const editingApp = ref<App | null>(null)
 const editTitle = ref('')
 const showDeleteConfirm = ref(false)
 const deleteTargetId = ref<string | null>(null)
+
+// Watch for auth changes to reload apps
+watch(isAuthenticated, (newVal) => {
+  if (newVal) {
+    loadApps()
+  } else {
+    apps.value = []
+  }
+})
 
 // Context menu state
 const contextMenuTarget = ref<App | null>(null)

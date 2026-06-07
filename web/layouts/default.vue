@@ -8,6 +8,7 @@ import {
 const { t, locale, setLocale, locales } = useI18n()
 const { session, isAuthenticated, loadSession, login, logout, demoLogin } = useAuthApi()
 const { request } = useApiRequest()
+const router = useRouter()
 
 const showLoginDialog = ref(false)
 const showSettingsDialog = ref(false)
@@ -16,6 +17,13 @@ const testing = ref(false)
 const configured = ref(false)
 const testResult = ref<{ success: boolean; message: string } | null>(null)
 const loggingIn = ref(false)
+
+// Watch for logout to redirect to home
+watch(isAuthenticated, (newVal) => {
+  if (!newVal) {
+    router.push('/')
+  }
+})
 
 const settingsForm = ref({
   provider: 'mock' as 'mock' | 'gpt' | 'mimo',
