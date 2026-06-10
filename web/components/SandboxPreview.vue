@@ -314,6 +314,3 @@ onBeforeUnmount(() => window.removeEventListener('message', onPreviewMessage))
   opacity: 0;
 }
 </style>
-    </div>
-  </div>
-</template>
