@@ -4,6 +4,12 @@ import type { GeneratedResult } from '~/types/apps'
 const props = defineProps<{
   result?: GeneratedResult | null
   activeTab: string
+  // Parallel streaming: per-file live text, the set of files still being written,
+  // and the file to default the editor to (first to start streaming).
+  streamingTexts?: Record<string, string>
+  streamingActive?: string[]
+  defaultStreamingPath?: string | null
+  generating?: boolean
 }>()
 
 const { t } = useI18n()
@@ -13,7 +19,6 @@ const selectedFile = ref<string | null>(null)
 const fileContent = ref('')
 const expandedFolders = ref<Set<string>>(new Set(['src']))
 const fileContents = ref<Record<string, string>>({})
-const activePreviewFile = ref<string | null>(null)
 
 interface FileNode {
   name: string
@@ -80,20 +85,53 @@ const allFiles = computed(() => {
 
 const expandedFolderList = computed(() => Array.from(expandedFolders.value))
 
-const previewCode = computed(() => {
-  const path = activePreviewFile.value || findDefaultPreviewFile()
-  return path ? fileContents.value[path] || '' : ''
+// The whole generated project, with any in-editor edits applied, handed to the
+// sandbox to run as one live app (internal routing stays inside the iframe).
+const previewFiles = computed(() => {
+  return (props.result?.fileStructure || [])
+    .filter(file => file.type === 'file')
+    .map(file => ({
+      path: file.path,
+      type: 'file' as const,
+      content: fileContents.value[file.path] ?? file.content ?? '',
+    }))
 })
 
-const previewRoutes = computed(() => {
-  return (props.result?.pages || [])
-    .map(page => ({
-      path: normalizeRoutePath(page.path),
-      name: page.name,
-      filePath: routeToFilePath(page.path),
-    }))
-    .filter(route => Boolean(route.filePath))
+const userPicked = ref(false)
+
+function onUserSelect(path: string) {
+  userPicked.value = true
+  selectFile(path)
+}
+
+const selectedIsWriting = computed(() =>
+  !!selectedFile.value && (props.streamingActive || []).includes(selectedFile.value),
+)
+
+// Show the selected file's live streamed text while it streams; otherwise the
+// normal editor buffer.
+const editorValue = computed(() => {
+  const texts = props.streamingTexts || {}
+  if (selectedFile.value && selectedFile.value in texts) return texts[selectedFile.value]
+  return fileContent.value
 })
+
+// Default the editor to the first file that started streaming, unless the user
+// has explicitly picked a file.
+watch(
+  () => props.defaultStreamingPath,
+  (path) => {
+    if (path && !userPicked.value) selectFile(path)
+  },
+)
+
+// A new generation run forgets the previous manual pick.
+watch(
+  () => props.generating,
+  (gen) => {
+    if (gen) userPicked.value = false
+  },
+)
 
 function toggleFolder(path: string) {
   if (expandedFolders.value.has(path)) {
@@ -115,37 +153,6 @@ function getFileContent(path: string) {
 function selectFile(path: string) {
   selectedFile.value = path
   fileContent.value = getFileContent(path)
-  if (path.endsWith('.vue')) {
-    activePreviewFile.value = path
-  }
-}
-
-function normalizeRoutePath(path: string) {
-  if (!path || path === 'index') return '/'
-  return path.startsWith('/') ? path : `/${path}`
-}
-
-function routeToFilePath(routePath: string) {
-  const route = normalizeRoutePath(routePath)
-  const candidates = route === '/'
-    ? ['src/pages/index.vue', 'pages/index.vue', 'src/App.vue']
-    : [
-        `src/pages${route}.vue`,
-        `pages${route}.vue`,
-        `src/pages${route}/index.vue`,
-        `pages${route}/index.vue`,
-      ]
-
-  return candidates.find(path => fileContents.value[path] !== undefined)
-    || candidates.find(path => allFiles.value.some(file => file.path === path))
-    || ''
-}
-
-function openPreviewRoute(routePath: string) {
-  const filePath = routeToFilePath(routePath)
-  if (!filePath) return
-  selectFile(filePath)
-  activePreviewFile.value = filePath
 }
 
 function fallbackFileContent(path: string) {
@@ -245,9 +252,6 @@ function onCodeChange(code: string) {
       [selectedFile.value]: code,
     }
   }
-  if (selectedFile.value?.endsWith('.vue')) {
-    activePreviewFile.value = selectedFile.value
-  }
 }
 
 function findDefaultPreviewFile() {
@@ -283,73 +287,44 @@ watch(
     }
     fileContents.value = nextContents
 
-    const nextPreviewFile = findDefaultPreviewFile()
-    activePreviewFile.value = nextPreviewFile
-    if (nextPreviewFile) {
-      selectFile(nextPreviewFile)
-    } else {
-      selectedFile.value = null
-      fileContent.value = ''
+    // Don't fight the streaming selection: while generating, keep the editor
+    // on whichever file the user (or the default) is viewing.
+    if (!props.generating) {
+      const nextPreviewFile = findDefaultPreviewFile()
+      if (nextPreviewFile) {
+        selectFile(nextPreviewFile)
+      } else {
+        selectedFile.value = null
+        fileContent.value = ''
+      }
     }
 
     expandedFolders.value = new Set(collectDirectoryPaths(fileTree.value))
   },
   { immediate: true },
 )
-
-onMounted(() => {
-  window.addEventListener('message', handlePreviewMessage)
-})
-
-onBeforeUnmount(() => {
-  window.removeEventListener('message', handlePreviewMessage)
-})
-
-function handlePreviewMessage(event: MessageEvent) {
-  if (!event.data || event.data.type !== 'atoms-preview-route') return
-  openPreviewRoute(String(event.data.route || '/'))
-}
 </script>
 
 <template>
-  <div v-if="!result" class="text-center py-8">
-    <FileText class="w-8 h-8 text-zinc-600 mx-auto mb-2" />
-    <p class="text-sm text-zinc-500">{{ t('common.notGenerated') }}</p>
+  <div v-if="!result" class="flex-1 min-h-0 flex flex-col items-center justify-center text-center gap-3">
+    <Loader2 v-if="generating" class="w-7 h-7 text-violet-400 animate-spin" />
+    <FileText v-else class="w-8 h-8 text-zinc-600" />
+    <p class="text-sm text-zinc-500">{{ generating ? t('workspace.thinking') : t('common.notGenerated') }}</p>
   </div>
 
-  <div v-else>
+  <div v-else class="flex-1 min-h-0 flex flex-col overflow-hidden">
     <!-- Preview with Sandbox -->
-    <div v-if="activeTab === 'preview'" class="h-[70vh] flex gap-4">
+    <div v-if="activeTab === 'preview'" class="flex-1 min-h-0 flex gap-4">
       <div class="flex-1 rounded-lg border border-zinc-800 overflow-hidden bg-zinc-950 flex flex-col">
         <div class="px-4 py-2 bg-zinc-900 border-b border-zinc-800 flex items-center gap-2 flex-shrink-0">
           <Eye class="w-4 h-4 text-zinc-500" />
           <span class="text-xs font-medium text-zinc-400">Preview</span>
-          <span v-if="activePreviewFile" class="ml-auto text-xs font-mono text-zinc-500 truncate">
-            {{ activePreviewFile }}
-          </span>
-          <UBadge v-if="previewCode" color="green" variant="subtle" size="xs">Live</UBadge>
-        </div>
-        <div v-if="previewRoutes.length > 1" class="px-4 py-2 bg-zinc-950 border-b border-zinc-800 flex items-center gap-2 overflow-x-auto flex-shrink-0">
-          <button
-            v-for="route in previewRoutes"
-            :key="route.path"
-            @click="openPreviewRoute(route.path)"
-            :class="[
-              'px-2 py-1 rounded text-xs whitespace-nowrap transition-colors',
-              activePreviewFile === route.filePath
-                ? 'bg-violet-500/20 text-violet-300'
-                : 'text-zinc-500 hover:text-zinc-300 hover:bg-zinc-800'
-            ]"
-          >
-            {{ route.name || route.path }}
-          </button>
+          <UBadge v-if="previewFiles.length" color="green" variant="subtle" size="xs" class="ml-auto">Live</UBadge>
         </div>
         <div class="flex-1 min-h-0 overflow-auto">
           <SandboxPreview
-            v-if="previewCode"
-            :code="previewCode"
-            :file-name="activePreviewFile || undefined"
-            :routes="previewRoutes"
+            v-if="previewFiles.length"
+            :files="previewFiles"
           />
           <div v-else class="flex items-center justify-center h-full text-zinc-600">
             <div class="text-center">
@@ -362,7 +337,7 @@ function handlePreviewMessage(event: MessageEvent) {
     </div>
 
     <!-- Product Spec -->
-    <div v-else-if="activeTab === 'spec'" class="space-y-6">
+    <div v-else-if="activeTab === 'spec'" class="flex-1 min-h-0 space-y-6 overflow-y-auto">
       <table class="w-full text-sm">
         <tbody class="divide-y divide-zinc-800">
           <tr>
@@ -411,7 +386,7 @@ function handlePreviewMessage(event: MessageEvent) {
     </div>
 
     <!-- Pages -->
-    <div v-else-if="activeTab === 'pages'" class="space-y-3">
+    <div v-else-if="activeTab === 'pages'" class="flex-1 min-h-0 space-y-3 overflow-y-auto">
       <div
         v-for="page in result.pages"
         :key="page.path"
@@ -434,7 +409,7 @@ function handlePreviewMessage(event: MessageEvent) {
     </div>
 
     <!-- API -->
-    <div v-else-if="activeTab === 'api'" class="space-y-2">
+    <div v-else-if="activeTab === 'api'" class="flex-1 min-h-0 space-y-2 overflow-y-auto">
       <div
         v-for="api in result.apis"
         :key="api.path"
@@ -457,7 +432,7 @@ function handlePreviewMessage(event: MessageEvent) {
     </div>
 
     <!-- Data Models -->
-    <div v-else-if="activeTab === 'models'" class="space-y-6">
+    <div v-else-if="activeTab === 'models'" class="flex-1 min-h-0 space-y-6 overflow-y-auto">
       <div v-for="model in result.dataModels" :key="model.name">
         <div class="flex items-center gap-2 mb-3">
           <span class="text-sm font-medium font-mono text-zinc-200">{{ model.name }}</span>
@@ -491,9 +466,9 @@ function handlePreviewMessage(event: MessageEvent) {
     </div>
 
     <!-- File Structure with Tree + CodeMirror -->
-    <div v-else-if="activeTab === 'files'" class="flex gap-4 h-[60vh]">
+    <div v-else-if="activeTab === 'files'" class="flex-1 min-h-0 flex gap-4">
       <!-- File Tree -->
-      <div class="w-64 flex-shrink-0 overflow-y-auto border-r border-zinc-800 pr-4">
+      <div class="w-64 flex-shrink-0 min-h-0 overflow-y-auto border-r border-zinc-800 pr-4">
         <div class="text-xs text-zinc-500 mb-3 font-medium uppercase tracking-wider">Files</div>
         <div class="space-y-0.5">
           <FileTreeNode
@@ -502,35 +477,35 @@ function handlePreviewMessage(event: MessageEvent) {
             :node="node"
             :selected-file="selectedFile"
             :expanded-paths="expandedFolderList"
-            @select="selectFile"
+            :streaming-paths="streamingActive || []"
+            @select="onUserSelect"
             @toggle="toggleFolder"
           />
         </div>
       </div>
 
       <!-- Code Editor -->
-      <div class="flex-1 overflow-hidden rounded-lg border border-zinc-800">
-        <div v-if="selectedFile" class="h-full flex flex-col">
-          <div class="flex items-center justify-between px-3 py-2 bg-zinc-900 border-b border-zinc-800">
+      <div class="flex-1 min-h-0 overflow-hidden rounded-lg border border-zinc-800 flex flex-col">
+        <div v-if="selectedFile" class="flex-1 min-h-0 flex flex-col">
+          <div class="flex items-center justify-between px-3 py-2 bg-zinc-900 border-b border-zinc-800 flex-shrink-0">
             <span class="text-xs font-mono text-zinc-400">{{ selectedFile }}</span>
             <div class="flex items-center gap-2">
+              <UBadge v-if="selectedIsWriting" color="primary" variant="subtle" size="xs">
+                writing…
+              </UBadge>
               <UBadge color="gray" variant="subtle" size="xs">{{ fileLanguage }}</UBadge>
-              <UButton v-if="selectedFile?.endsWith('.vue')" size="xs" variant="ghost" color="primary" @click="activePreviewFile = selectedFile">
-                <Play class="w-3 h-3 mr-1" />
-                Run
-              </UButton>
             </div>
           </div>
-          <div class="flex-1 overflow-auto">
+          <div class="flex-1 min-h-0 overflow-hidden">
             <CodeEditor
-              :model-value="fileContent"
+              :model-value="editorValue"
               :language="fileLanguage"
-              :read-only="false"
+              :read-only="Boolean(generating)"
               @update:model-value="onCodeChange"
             />
           </div>
         </div>
-        <div v-else class="flex items-center justify-center h-full text-zinc-600">
+        <div v-else class="flex-1 flex items-center justify-center text-zinc-600">
           <div class="text-center">
             <FileCode class="w-12 h-12 mx-auto mb-2" />
             <p class="text-sm">Select a file to edit</p>

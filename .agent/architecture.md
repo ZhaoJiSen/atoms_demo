@@ -24,17 +24,23 @@ docker-compose.yml
 ## 前端职责
 
 前端位于 `web/`，技术栈为 Nuxt、TypeScript、Tailwind CSS、Nuxt UI、
-CodeMirror、Vue SFC loader 和 Xterm。
+CodeMirror、vue3-sfc-loader 和 Xterm。
 
 前端负责：
 
-- 暗色工作台布局、侧边栏、顶部导航和语言切换。
+- 暗色工作台布局、侧边栏、顶部导航和语言切换。应用为**纯暗色**，
+  通过 `plugins/force-dark.client.ts` 强制 color-mode 为 dark（覆盖浏览器残留偏好）。
 - 首页 prompt 输入、建议项展示和创建 App 入口。
 - App Workspace、GeneratedResult Tabs、文件结构和代码查看。
-- Preview 原型展示和 sandbox / SFC 预览能力。
+- 消费 `…/generate/stream` 的 SSE：内联步骤进度、代码逐字写入 CodeMirror、
+  文件树并发 spinner、思考中/写入中标识（无遮罩 Modal、无假定时器）。
+- **Preview 真正运行生成的应用**：`SandboxPreview.vue` 用 vue3-sfc-loader 在
+  `sandbox="allow-scripts allow-forms allow-modals allow-popups"` 的 srcdoc iframe 内
+  编译挂载整套文件；运行时(vue / vue-router / sfc-loader)自托管在
+  `web/public/preview-runtime/`（不走外部 CDN，适配阿里云国内部署）。
 - Notes 列表、编辑器和后续结构化入口。
 - Servers 列表、服务器表单和 Xterm 终端页。
-- Google OAuth 登录状态展示。
+- Google OAuth / Demo 登录状态展示。
 - AI 设置表单。
 - 调用后端 `/api` 接口。
 
@@ -63,18 +69,23 @@ SSH2 和 Tower HTTP。
 
 当前 Rust 代码按职责分割：
 
-- `main.rs`：启动、环境变量和路由挂载。
-- `routes.rs`：App、Notes、AI Settings 和主 API 路由。
-- `auth.rs`：Google OAuth、session cookie 和当前用户。
+- `main.rs`：启动、环境变量、`tracing` 日志初始化和路由挂载。
+- `routes.rs`：App、Notes、AI Settings 主 API 路由；SSE 流式生成编排
+  （`generate_app_stream`：分层并行逐文件生成、`mpsc` 汇聚、`Semaphore` 限流）。
+- `auth.rs`：Google OAuth、Demo 登录、session cookie 和当前用户。
 - `db.rs`：Postgres migration 与 CRUD。
 - `models.rs`：API request / response / domain model。
 - `state.rs`：内存态和 Postgres state。
 - `mock.rs`：无 AI 配置时的 mock 生成。
-- `ai.rs`：AI 调用主流程。
-- `ai/prompt.rs`：内置系统提示词和生成提示词。
-- `ai/parser.rs`：AI 响应提取、JSON 解析和枚举标准化。
+- `ai.rs`：AI 调用主流程，分阶段函数 `plan_app`（规划）、`open_file_stream`
+  （单文件流式）、`generate_with_ai`（同步全量）。
+- `ai/prompt.rs`：系统提示词、规划提示词、单文件生成提示词。
+- `ai/parser.rs`：AI 响应提取、JSON 解析、流式 delta 解析和枚举标准化。
 - `servers.rs`：服务器连接 CRUD 和凭据校验。
 - `servers/terminal.rs`：SSH WebSocket 终端会话。
+
+新增依赖：`async-stream`（SSE 流编排）、`tracing` / `tracing-subscriber`（结构化日志，
+用 `RUST_LOG` 调级别）。
 
 新增 Rust 功能时应优先复用这些边界，不要把所有逻辑堆回 `routes.rs`。
 
@@ -109,6 +120,11 @@ Postgres migration 当前覆盖：
 - App、Notes、Servers、OAuth users 和 sessions 支持 Postgres。
 - Server 凭据在 Postgres 模式下写入 `server_credentials`。
 - AI Settings 当前只保存在内存，不进 Postgres。
+- App id 为 `app_{序号}{6位随机}`，随机后缀防止内存计数器重启后与已存数据撞 id、
+  覆盖他人应用。
+- `apps` 表 `put_app` 的 `ON CONFLICT (id)` 会同时更新 `user_id`：谁保存谁拥有
+  （Demo 级数据隔离取舍）。`GET /api/apps` 按 `user_id` 过滤，`GET /api/apps/:id`
+  不做 owner 校验。
 
 ## 敏感信息规则
 

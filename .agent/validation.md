@@ -52,9 +52,9 @@
   -> 输入 idea
   -> 选择或采用 prompt 建议
   -> POST /api/apps
-  -> /app/:id/workspace
-  -> POST /api/apps/:id/generate
-  -> /app/:id/preview
+  -> /app/:id  (自动触发)
+  -> EventSource GET /api/apps/:id/generate/stream
+  -> Files Tab 看代码实时写入 -> 完成后自动进 Preview Tab(真实运行)
 ```
 
 必须验证：
@@ -65,9 +65,11 @@
 - 未登录时受保护写入有明确拦截。
 - 登录后可以创建 App。
 - Workspace 展示 steps、messages、status 和 result。
-- Workspace 支持追加后续需求并触发再生成。
+- 生成过程内联流式展示：步骤进度、代码逐字写入 CodeMirror、文件树并发 spinner（无遮罩 Modal）。
+- Preview 为真实运行的应用（vue3-sfc-loader 沙箱），内部路由可跳转、外部隔离。
+- Workspace 支持追加后续需求并触发再生成（流式、整份覆盖）。
 - 再生成后 result、文件结构和 Preview 使用新结果刷新。
-- generating 时禁止重复触发。
+- generating 被中断后，重新进入 `/app/:id` 能自动重跑；离开/刷新有二次确认。
 - completed 后可以进入 Preview。
 - failed 时有错误原因和 retry 入口。
 

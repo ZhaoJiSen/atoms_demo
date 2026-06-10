@@ -1,12 +1,20 @@
+use std::collections::HashMap;
+use std::convert::Infallible;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 
 use axum::{
     Json, Router,
     extract::{Path, State},
     http::{HeaderMap, StatusCode},
+    response::{
+        IntoResponse, Response,
+        sse::{Event, KeepAlive, Sse},
+    },
     routing::{get, post},
 };
 use serde_json::{Value, json};
+use tokio::sync::{Semaphore, mpsc};
 use tower_http::{cors::CorsLayer, trace::TraceLayer};
 
 use crate::{
@@ -18,9 +26,9 @@ use crate::{
         should_mock_generation_fail,
     },
     models::{
-        AgentMessage, AgentMessageRole, AgentStepStatus, App, AppStatus, CreateAppMessageRequest,
-        CreateAppRequest, CreateNoteRequest, Note, UpdateAiSettingsRequest, UpdateAppRequest,
-        UpdateNoteRequest,
+        AgentMessage, AgentMessageRole, AgentStepStatus, AiSettings, App, AppStatus,
+        CreateAppMessageRequest, CreateAppRequest, CreateNoteRequest, FileNode, FileNodeType,
+        GeneratedResult, Note, UpdateAiSettingsRequest, UpdateAppRequest, UpdateNoteRequest,
     },
     servers::{create_server, delete_server, get_server, list_servers, terminal_ws, update_server},
     state::AppState,
@@ -43,6 +51,7 @@ pub(crate) fn build_router(state: AppState) -> Router {
         )
         .route("/api/apps/{id}/messages", post(create_app_message))
         .route("/api/apps/{id}/generate", post(generate_app))
+        .route("/api/apps/{id}/generate/stream", get(generate_app_stream))
         .route("/api/servers", get(list_servers).post(create_server))
         .route(
             "/api/servers/{id}",
@@ -67,6 +76,19 @@ async fn health() -> Json<Value> {
     Json(json!({ "status": "ok" }))
 }
 
+/// Unique app id. A sequential prefix keeps ids readable, but a random suffix
+/// prevents collisions with already-persisted apps after the in-memory counter
+/// resets on restart (which previously overwrote other users' apps).
+fn generate_app_id(seq: u64) -> String {
+    use rand::{Rng, distributions::Alphanumeric};
+    let suffix: String = rand::thread_rng()
+        .sample_iter(&Alphanumeric)
+        .take(6)
+        .map(char::from)
+        .collect();
+    format!("app_{seq:03}{suffix}")
+}
+
 async fn create_app(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -80,7 +102,7 @@ async fn create_app(
     }
 
     let id_number = state.next_id.fetch_add(1, Ordering::Relaxed);
-    let id = format!("app_{id_number:03}");
+    let id = generate_app_id(id_number);
     let timestamp = now_iso();
     let title = derive_title(idea);
     let app = App {
@@ -312,6 +334,7 @@ async fn generate_app(
         let mut app = load_app_for_update(&state, &id).await?;
 
         let failed_at = now_iso();
+        tracing::warn!(app_id = %id, "Generation failed (mock failure trigger)");
         if let Some(first_step) = app.steps.first_mut() {
             first_step.status = AgentStepStatus::Error;
             first_step.completed_at = Some(failed_at.clone());
@@ -340,6 +363,7 @@ async fn generate_app(
 
     let result = if let Some(settings) = ai_settings {
         // Use real AI generation
+        tracing::info!(app_id = %id, title = %title, "Generating app with AI provider");
         match crate::ai::generate_with_ai(
             &settings,
             &idea,
@@ -351,6 +375,7 @@ async fn generate_app(
         {
             Ok(result) => result,
             Err(e) => {
+                tracing::error!(app_id = %id, error = ?e, "AI generation failed");
                 let mut app = load_app_for_update(&state, &id).await?;
                 app.status = AppStatus::Failed;
                 app.error = Some("AI generation failed".to_string());
@@ -361,6 +386,7 @@ async fn generate_app(
         }
     } else {
         // Use mock generation
+        tracing::info!(app_id = %id, title = %title, "Generating app with mock (no AI settings)");
         generate_mock_result(&title, &mock_generation_context)
     };
 
@@ -380,8 +406,424 @@ async fn generate_app(
     app.status = AppStatus::Completed;
     app.updated_at = completed_at;
     save_app(&state, &user.id, &app).await?;
+    tracing::info!(app_id = %id, "Generation completed");
 
     Ok(Json(app))
+}
+
+fn sse_event(name: &str, data: Value) -> Result<Event, Infallible> {
+    Ok(Event::default().event(name).data(data.to_string()))
+}
+
+fn is_code_file(path: &str) -> bool {
+    matches!(
+        path.rsplit('.').next(),
+        Some("vue" | "ts" | "tsx" | "js" | "jsx" | "mjs" | "css")
+    )
+}
+
+/// Dependency tier for ordering file generation. Lower tiers are generated first
+/// and their real code is passed as context to higher tiers that import them:
+/// 0 foundations (.ts/utils/composables/stores) → 1 components → 2 pages/App → 3 entry.
+fn file_tier(path: &str) -> u8 {
+    if path.ends_with("main.ts") || path.ends_with("main.js") || path.ends_with("main.mjs") {
+        return 3;
+    }
+    if path.ends_with("App.vue") || path.contains("/pages/") || path.starts_with("pages/") {
+        return 2;
+    }
+    if path.contains("/components/") || path.starts_with("components/") {
+        return 1;
+    }
+    0
+}
+
+fn template_file_content(path: &str) -> String {
+    match path.rsplit('.').next() {
+        Some("json") => "{}\n".to_string(),
+        Some("md") => format!("# {path}\n"),
+        _ => format!("// {path}\n"),
+    }
+}
+
+fn fallback_file_content(path: &str) -> String {
+    if path.ends_with(".vue") {
+        "<template>\n  <div class=\"placeholder\">Generation failed for this component.</div>\n</template>\n\n<style scoped>\n.placeholder { padding: 16px; color: #a1a1aa; }\n</style>\n".to_string()
+    } else {
+        template_file_content(path)
+    }
+}
+
+/// Messages produced by a per-file streaming task, merged into the SSE stream.
+enum FileMsg {
+    Start(String),
+    Chunk(String, String),
+    End(FileNode),
+}
+
+/// Max number of files generated concurrently, to stay under provider rate limits.
+const MAX_CONCURRENT_FILES: usize = 4;
+
+/// Generate one file's content, streaming token deltas to `tx` as they arrive.
+/// Runs as its own task so multiple files generate in parallel. Returns early if
+/// the receiver is gone (client disconnected) to avoid wasted provider calls.
+async fn stream_one_file(
+    settings: Option<AiSettings>,
+    plan_json: Arc<String>,
+    node: FileNode,
+    tx: mpsc::Sender<FileMsg>,
+    semaphore: Arc<Semaphore>,
+) {
+    // Wait for a concurrency slot before starting (rate limiting). Holding the
+    // permit for the file's lifetime caps simultaneous in-flight generations.
+    let _permit = match semaphore.acquire().await {
+        Ok(permit) => permit,
+        Err(_) => return,
+    };
+
+    let path = node.path.clone();
+    if tx.send(FileMsg::Start(path.clone())).await.is_err() {
+        return;
+    }
+    let desc = node.description.clone().unwrap_or_default();
+
+    let content: String = if let Some(existing) = node.content.clone() {
+        // Mock path: stream known content in chunks for a typing effect.
+        let mut i = 0usize;
+        while i < existing.len() {
+            let mut end = (i + 48).min(existing.len());
+            while !existing.is_char_boundary(end) {
+                end += 1;
+            }
+            if tx
+                .send(FileMsg::Chunk(path.clone(), existing[i..end].to_string()))
+                .await
+                .is_err()
+            {
+                return;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(22)).await;
+            i = end;
+        }
+        existing
+    } else if let Some(settings) = &settings {
+        if is_code_file(&path) {
+            match crate::ai::open_file_stream(settings, &plan_json, &path, &desc).await {
+                Ok(mut resp) => {
+                    let mut acc = String::new();
+                    let mut buf = String::new();
+                    loop {
+                        match resp.chunk().await {
+                            Ok(Some(bytes)) => {
+                                buf.push_str(&String::from_utf8_lossy(&bytes));
+                                while let Some(nl) = buf.find('\n') {
+                                    let line: String = buf.drain(..=nl).collect();
+                                    if let Some(delta) =
+                                        crate::ai::extract_stream_delta(line.trim_end())
+                                    {
+                                        acc.push_str(&delta);
+                                        if tx
+                                            .send(FileMsg::Chunk(path.clone(), delta))
+                                            .await
+                                            .is_err()
+                                        {
+                                            return;
+                                        }
+                                    }
+                                }
+                            }
+                            Ok(None) => break,
+                            Err(_) => break,
+                        }
+                    }
+                    if let Some(delta) = crate::ai::extract_stream_delta(buf.trim_end()) {
+                        acc.push_str(&delta);
+                        let _ = tx.send(FileMsg::Chunk(path.clone(), delta)).await;
+                    }
+                    crate::ai::strip_code_fences(&acc)
+                }
+                Err(_) => fallback_file_content(&path),
+            }
+        } else {
+            template_file_content(&path)
+        }
+    } else {
+        template_file_content(&path)
+    };
+
+    let filled = FileNode {
+        path,
+        node_type: FileNodeType::File,
+        description: node.description.clone(),
+        content: Some(content),
+    };
+    let _ = tx.send(FileMsg::End(filled)).await;
+}
+
+async fn persist_failed_app(state: &AppState, user_id: &str, id: &str, message: &str) {
+    if let Ok(mut app) = load_app_for_update(state, id).await {
+        let failed_at = now_iso();
+        if let Some(first_step) = app.steps.first_mut() {
+            first_step.status = AgentStepStatus::Error;
+            first_step.completed_at = Some(failed_at.clone());
+        }
+        app.status = AppStatus::Failed;
+        app.error = Some(message.to_string());
+        app.updated_at = failed_at.clone();
+        app.messages.push(AgentMessage {
+            id: "msg_error_stream".into(),
+            role: AgentMessageRole::Error,
+            agent_name: Some("Reviewer Agent".into()),
+            content: message.to_string(),
+            created_at: failed_at,
+        });
+        let _ = save_app(state, user_id, &app).await;
+    }
+}
+
+async fn finalize_streamed_app(
+    state: &AppState,
+    user_id: &str,
+    id: &str,
+    result: GeneratedResult,
+) -> ApiResult<App> {
+    let mut app = load_app_for_update(state, id).await?;
+    let completed_at = now_iso();
+    for step in &mut app.steps {
+        if step.started_at.is_none() {
+            step.started_at = Some(completed_at.clone());
+        }
+        step.status = AgentStepStatus::Done;
+        step.completed_at = Some(completed_at.clone());
+    }
+    let next_message_index = app.messages.len() + 1;
+    app.messages.extend(generated_messages(next_message_index));
+    app.result = Some(result);
+    app.status = AppStatus::Completed;
+    app.updated_at = completed_at;
+    save_app(state, user_id, &app).await?;
+    Ok(app)
+}
+
+/// Streamed, staged generation. Emits SSE events as each agent stage completes:
+/// `step` (status changes), `partial` (plan), `file` (one file ready), `done`, `error`.
+async fn generate_app_stream(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Path(id): Path<String>,
+) -> Response {
+    let user = match require_auth(&state, &headers).await {
+        Ok(u) => u,
+        Err(e) => return e.into_response(),
+    };
+    let user_id = user.id.clone();
+
+    // Prelude: flip the app to `generating` and snapshot the generation context.
+    let (title, idea, conversation_context, previous_result_json, mock_generation_context) = {
+        let mut app = match load_app_for_update(&state, &id).await {
+            Ok(a) => a,
+            Err(e) => return e.into_response(),
+        };
+        // Note: we intentionally do NOT 409 on `Generating` here. If a previous
+        // stream was interrupted (client navigated away/refreshed), the app is
+        // left stuck in `Generating`; re-entering must be able to restart it.
+        // Capture revision context BEFORE clearing the previous result.
+        let previous_result_json = app
+            .result
+            .as_ref()
+            .and_then(|r| serde_json::to_string_pretty(r).ok());
+
+        let started_at = now_iso();
+        app.status = AppStatus::Generating;
+        app.error = None;
+        app.result = None;
+        app.updated_at = started_at;
+        app.steps = default_steps();
+
+        let title = app.title.clone();
+        let idea = app.idea.clone();
+        let conversation_context = build_generation_context(&app);
+        let mock_generation_context = build_mock_generation_context(&app);
+        if let Err(e) = save_app(&state, &user_id, &app).await {
+            return e.into_response();
+        }
+        (
+            title,
+            idea,
+            conversation_context,
+            previous_result_json,
+            mock_generation_context,
+        )
+    };
+
+    let ai_settings = match state.ai_settings.lock() {
+        Ok(guard) => guard.clone(),
+        Err(_) => return ApiError::Internal("Failed to access AI settings").into_response(),
+    };
+    let mock_should_fail = should_mock_generation_fail(&mock_generation_context);
+
+    let stream = async_stream::stream! {
+        let analyze_started = now_iso();
+        yield sse_event("step", json!({"id":"analyze_idea","status":"running","startedAt":analyze_started}));
+
+        if mock_should_fail {
+            persist_failed_app(&state, &user_id, &id, "Mock generation failed before producing a preview.").await;
+            yield sse_event("fail", json!({"error":"Failed to generate app"}));
+            return;
+        }
+
+        // Stage 1 — Planner: product plan + file manifest.
+        let plan = if let Some(settings) = &ai_settings {
+            match crate::ai::plan_app(settings, &idea, &title, &conversation_context, previous_result_json.as_deref()).await {
+                Ok(p) => p,
+                Err(_) => {
+                    persist_failed_app(&state, &user_id, &id, "AI planning failed").await;
+                    yield sse_event("fail", json!({"error":"AI planning failed"}));
+                    return;
+                }
+            }
+        } else {
+            generate_mock_result(&title, &mock_generation_context)
+        };
+
+        let plan_done = now_iso();
+        for sid in ["analyze_idea", "plan_product", "design_pages", "define_api"] {
+            yield sse_event("step", json!({"id":sid,"status":"done","completedAt":plan_done.clone()}));
+        }
+        yield sse_event("partial", json!({
+            "productSpec": serde_json::to_value(&plan.product_spec).unwrap_or(Value::Null),
+            "pages": serde_json::to_value(&plan.pages).unwrap_or(Value::Null),
+            "apis": serde_json::to_value(&plan.apis).unwrap_or(Value::Null),
+            "dataModels": serde_json::to_value(&plan.data_models).unwrap_or(Value::Null),
+            "preview": serde_json::to_value(&plan.preview).unwrap_or(Value::Null),
+        }));
+        // The file tree renders immediately from the manifest; contents stream in next.
+        yield sse_event("manifest", json!({
+            "fileStructure": serde_json::to_value(&plan.file_structure).unwrap_or(Value::Null),
+        }));
+
+        // Stage 2 — Engineer: generate files in dependency LAYERS. Foundations are
+        // written first (utils/.ts → components → pages/App → main), and each layer's
+        // REAL generated code is fed as context to the layers above it, so cross-file
+        // APIs always line up. Files within a layer still stream in parallel.
+        yield sse_event("step", json!({"id":"generate_files","status":"running","startedAt":now_iso()}));
+        let available_paths = plan
+            .file_structure
+            .iter()
+            .filter(|n| matches!(n.node_type, FileNodeType::File))
+            .map(|n| n.path.as_str())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let base_context = format!(
+            "{}\n\nAVAILABLE FILES — you may import ONLY these exact paths; never import a file that is not in this list:\n{}",
+            serde_json::to_string_pretty(&plan).unwrap_or_default(),
+            available_paths,
+        );
+
+        // Bucket files into dependency tiers (0 = foundations … 3 = entry).
+        let mut tiers: [Vec<FileNode>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+        for node in &plan.file_structure {
+            if matches!(node.node_type, FileNodeType::File) {
+                tiers[file_tier(&node.path) as usize].push(node.clone());
+            }
+        }
+
+        let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_FILES));
+        let mut accumulated = base_context;
+        let mut generated: HashMap<String, FileNode> = HashMap::new();
+
+        for tier in tiers.iter() {
+            if tier.is_empty() {
+                continue;
+            }
+            let ctx = Arc::new(accumulated.clone());
+            let (tx, mut rx) = mpsc::channel::<FileMsg>(64);
+            for node in tier {
+                tokio::spawn(stream_one_file(
+                    ai_settings.clone(),
+                    ctx.clone(),
+                    node.clone(),
+                    tx.clone(),
+                    semaphore.clone(),
+                ));
+            }
+            drop(tx); // channel closes once this tier's tasks finish
+
+            while let Some(msg) = rx.recv().await {
+                match msg {
+                    FileMsg::Start(path) => {
+                        yield sse_event("file_start", json!({"path": path}));
+                    }
+                    FileMsg::Chunk(path, delta) => {
+                        yield sse_event("file_chunk", json!({"path": path, "delta": delta}));
+                    }
+                    FileMsg::End(node) => {
+                        yield sse_event("file_end", serde_json::to_value(&node).unwrap_or(Value::Null));
+                        generated.insert(node.path.clone(), node);
+                    }
+                }
+            }
+
+            // Feed this tier's real code to the layers that depend on it.
+            for node in tier {
+                if let Some(content) = generated.get(&node.path).and_then(|f| f.content.as_ref()) {
+                    accumulated.push_str(&format!(
+                        "\n\n--- ALREADY GENERATED FILE: {} ---\n{}\n",
+                        node.path, content
+                    ));
+                }
+            }
+        }
+
+        // Reassemble in the original plan order (tasks complete out of order).
+        let mut filled_files: Vec<FileNode> = Vec::new();
+        for node in &plan.file_structure {
+            if matches!(node.node_type, FileNodeType::File) {
+                filled_files.push(generated.remove(&node.path).unwrap_or_else(|| FileNode {
+                    path: node.path.clone(),
+                    node_type: FileNodeType::File,
+                    description: node.description.clone(),
+                    content: Some(fallback_file_content(&node.path)),
+                }));
+            } else {
+                filled_files.push(FileNode {
+                    path: node.path.clone(),
+                    node_type: FileNodeType::Directory,
+                    description: node.description.clone(),
+                    content: None,
+                });
+            }
+        }
+        yield sse_event("step", json!({"id":"generate_files","status":"done","completedAt":now_iso()}));
+
+        // Stage 3 — preview + finalize.
+        yield sse_event("step", json!({"id":"build_preview","status":"running","startedAt":now_iso()}));
+        yield sse_event("step", json!({"id":"build_preview","status":"done","completedAt":now_iso()}));
+        yield sse_event("step", json!({"id":"finalize","status":"running","startedAt":now_iso()}));
+
+        let final_result = GeneratedResult {
+            product_spec: plan.product_spec,
+            pages: plan.pages,
+            apis: plan.apis,
+            data_models: plan.data_models,
+            file_structure: filled_files,
+            preview: plan.preview,
+        };
+
+        match finalize_streamed_app(&state, &user_id, &id, final_result).await {
+            Ok(app) => {
+                yield sse_event("step", json!({"id":"finalize","status":"done","completedAt":now_iso()}));
+                yield sse_event("done", serde_json::to_value(&app).unwrap_or(Value::Null));
+            }
+            Err(_) => {
+                yield sse_event("fail", json!({"error":"Failed to save generated app"}));
+            }
+        }
+    };
+
+    Sse::new(stream)
+        .keep_alive(KeepAlive::default())
+        .into_response()
 }
 
 async fn load_app_for_update(state: &AppState, id: &str) -> ApiResult<App> {

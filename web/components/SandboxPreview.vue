@@ -1,280 +1,272 @@
 <script setup lang="ts">
+import type { FileNode } from '~/types/apps'
+
 const props = defineProps<{
-  code: string
-  fileName?: string
-  routes?: Array<{ path: string; filePath: string; name: string }>
+  // Whole generated project. Only `type: 'file'` nodes with content are run.
+  files: FileNode[]
+  // Optional explicit entry path; otherwise auto-detected.
+  entry?: string
 }>()
 
-const error = ref<string | null>(null)
 const srcdoc = ref('')
+const empty = ref(false)
 
-function extractBlock(code: string, tag: string) {
-  const match = code.match(new RegExp(`<${tag}[^>]*>([\\s\\S]*?)<\\/${tag}>`, 'i'))
-  return match?.[1]?.trim() || ''
+// Pick the module that should bootstrap the app.
+// Prefer a self-mounting entry (main.*) so router/plugin wiring is preserved,
+// then fall back to a root component.
+function detectEntry(fileMap: Record<string, string>): string | null {
+  const keys = Object.keys(fileMap)
+  const prefer = [
+    'src/main.ts', 'src/main.js', 'src/main.mjs',
+    'main.ts', 'main.js', 'main.mjs',
+    'src/App.vue', 'App.vue',
+    'src/pages/index.vue', 'pages/index.vue',
+  ]
+  for (const p of prefer) {
+    if (fileMap[p] != null) return p
+  }
+  return keys.find(k => k.endsWith('.vue')) || keys.find(k => /\.(ts|js|mjs)$/.test(k)) || null
 }
 
-function extractDataValues(script: string) {
-  const values: Record<string, string> = {
-    title: 'Preview',
-    workoutCount: '5',
-    totalCalories: '2000',
-    weight: '70.5',
+function buildSrcdoc() {
+  empty.value = false
+
+  const fileMap: Record<string, string> = {}
+  for (const node of props.files || []) {
+    if (node.type === 'file' && typeof node.content === 'string') {
+      fileMap[node.path.replace(/^\.?\//, '')] = node.content
+    }
   }
 
-  const simpleFields = script.matchAll(/(\w+)\s*:\s*(['"])(.*?)\2/g)
-  for (const match of simpleFields) {
-    values[match[1]] = match[3]
+  const entry = (props.entry && fileMap[props.entry.replace(/^\.?\//, '')] != null)
+    ? props.entry.replace(/^\.?\//, '')
+    : detectEntry(fileMap)
+
+  if (!entry) {
+    empty.value = true
+    srcdoc.value = ''
+    return
   }
 
-  const numberFields = script.matchAll(/(\w+)\s*:\s*(-?\d+(?:\.\d+)?)/g)
-  for (const match of numberFields) {
-    values[match[1]] = match[2]
-  }
+  // Embed payload as escaped JSON: generated SFC content contains literal
+  // script-closing tags, so escape every "<" to stop the host script tag
+  // from closing early.
+  const payload = JSON.stringify({ files: fileMap, entry }).replace(/</g, '\\u003c')
+  const origin = window.location.origin
 
-  return values
-}
-
-function titleFromComponentName(name: string) {
-  return name
-    .replace(/([a-z0-9])([A-Z])/g, '$1 $2')
-    .replace(/[-_]/g, ' ')
-}
-
-function attrsToText(attrs: string, values: Record<string, string>) {
-  const parts: string[] = []
-  const attrMatches = attrs.matchAll(/(?::)?([\w-]+)=["']([^"']+)["']/g)
-
-  for (const match of attrMatches) {
-    const key = match[1]
-    const rawValue = match[2]
-    const value = values[rawValue] || rawValue
-
-    if (key === 'class' || key === 'style') continue
-    parts.push(`${key}: ${value}`)
-  }
-
-  return parts.join(' · ')
-}
-
-function componentPlaceholder(name: string, attrs: string, values: Record<string, string>) {
-  const detail = attrsToText(attrs, values)
-  return `<section class="component-card">
-    <div class="component-title">${escapeHtml(titleFromComponentName(name))}</div>
-    ${detail ? `<div class="component-detail">${escapeHtml(detail)}</div>` : ''}
-  </section>`
-}
-
-function escapeHtml(value: string) {
-  return value
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;')
-    .replace(/"/g, '&quot;')
-}
-
-function stripVueDirectives(template: string) {
-  return template
-    .replace(/\s+v-\w+(?::[\w-]+)?=(["']).*?\1/g, '')
-    .replace(/\s+@\w+(?::[\w-]+)?=(["']).*?\1/g, '')
-    .replace(/\s+:\w+=(["']).*?\1/g, '')
-}
-
-function replaceRouterLinks(template: string) {
-  return template
-    .replace(
-      /<router-link([^>]*)to=["']([^"']+)["']([^>]*)>([\s\S]*?)<\/router-link>/gi,
-      (_, before: string, to: string, after: string, label: string) => {
-        return `<a${before}${after} href="${escapeHtml(to)}" data-route="${escapeHtml(to)}">${label}</a>`
-      },
-    )
-    .replace(
-      /<RouterLink([^>]*)to=["']([^"']+)["']([^>]*)>([\s\S]*?)<\/RouterLink>/g,
-      (_, before: string, to: string, after: string, label: string) => {
-        return `<a${before}${after} href="${escapeHtml(to)}" data-route="${escapeHtml(to)}">${label}</a>`
-      },
-    )
-}
-
-function renderMustaches(template: string, values: Record<string, string>) {
-  return template.replace(/\{\{\s*([\w.]+)\s*\}\}/g, (_, key: string) => {
-    const shortKey = key.split('.').pop() || key
-    return escapeHtml(values[key] || values[shortKey] || shortKey)
-  })
-}
-
-function replaceSelfClosingComponents(template: string, values: Record<string, string>) {
-  return template.replace(/<([A-Z][\w.-]*)([^>]*)\/>/g, (_, name: string, attrs: string) => {
-    return componentPlaceholder(name, attrs, values)
-  })
-}
-
-function replacePairedEmptyComponents(template: string, values: Record<string, string>) {
-  return template.replace(/<([A-Z][\w.-]*)([^>]*)>\s*<\/\1>/g, (_, name: string, attrs: string) => {
-    return componentPlaceholder(name, attrs, values)
-  })
-}
-
-function buildFallbackHtml(values: Record<string, string>) {
-  return `<main class="generated-app">
-    <section class="hero">
-      <p class="eyebrow">Generated Preview</p>
-      <h1>${escapeHtml(values.title || 'Preview')}</h1>
-      <p>Live preview generated from the selected Vue file.</p>
-    </section>
-    <section class="grid">
-      <article class="metric"><span>Workouts</span><strong>${escapeHtml(values.workoutCount || '5')}</strong></article>
-      <article class="metric"><span>Calories</span><strong>${escapeHtml(values.totalCalories || '2000')}</strong></article>
-      <article class="metric"><span>Weight</span><strong>${escapeHtml(values.weight || '70.5')}</strong></article>
-    </section>
-  </main>`
-}
-
-function buildSrcdoc(code: string) {
-  error.value = null
-
-  const template = extractBlock(code, 'template')
-  const script = extractBlock(code, 'script')
-  const style = extractBlock(code, 'style')
-  const values = extractDataValues(script)
-
-  if (!template) {
-    error.value = 'No <template> block found in selected Vue file.'
-    return ''
-  }
-
-  let html = template
-  html = replaceRouterLinks(html)
-  html = renderMustaches(html, values)
-  html = replaceSelfClosingComponents(html, values)
-  html = replacePairedEmptyComponents(html, values)
-  html = stripVueDirectives(html)
-
-  if (!html.trim()) {
-    html = buildFallbackHtml(values)
-  }
-
-  const bridgeScript = `<scr` + `ipt>
-      window.__ROUTES__ = ${JSON.stringify(props.routes || [])};
-      document.addEventListener('click', function(event) {
-        var target = event.target && event.target.closest ? event.target.closest('a[href], [data-route]') : null;
-        if (!target) return;
-        var route = target.getAttribute('data-route') || target.getAttribute('href');
-        if (!route || route.indexOf('http') === 0 || route.indexOf('#') === 0) return;
-        event.preventDefault();
-        window.parent.postMessage({ type: 'atoms-preview-route', route: route }, '*');
-      });
-    </scr` + `ipt>`
-
-  return `<!doctype html>
+  srcdoc.value = `<!doctype html>
 <html>
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <style>
       * { box-sizing: border-box; }
+      html, body, #app { height: 100%; margin: 0; }
       body {
-        margin: 0;
-        min-height: 100vh;
         background: #09090b;
         color: #f4f4f5;
         font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       }
-      #app { min-height: 100vh; padding: 24px; }
-      h1, h2, h3, p { margin-top: 0; }
-      button, input, select {
-        border-radius: 6px;
-        border: 1px solid #3f3f46;
-        background: #18181b;
-        color: #f4f4f5;
-        padding: 8px 10px;
-      }
-      button {
-        background: #8b5cf6;
-        border-color: #8b5cf6;
-        cursor: pointer;
-      }
-      form, .dashboard, .workout-log, .diet-tracker, .weight-tracker, #app > div {
-        display: grid;
-        gap: 16px;
-      }
-      nav {
-        display: flex;
-        gap: 10px;
-        padding: 10px;
-        margin-bottom: 18px;
-        border: 1px solid #27272a;
-        border-radius: 8px;
-        background: #18181b;
-      }
-      a { color: #c4b5fd; text-decoration: none; }
-      a:hover { color: #ddd6fe; text-decoration: underline; }
-      .component-card, .metric-card, .recent-logs, .weight-chart {
-        border: 1px solid #27272a;
-        border-radius: 8px;
-        background: #18181b;
+      #__preview_error__ {
+        display: none;
         padding: 16px;
-      }
-      .component-title {
-        font-size: 13px;
-        font-weight: 700;
-        color: #ddd6fe;
-        text-transform: uppercase;
-        letter-spacing: .04em;
-      }
-      .component-detail {
-        margin-top: 8px;
-        color: #a1a1aa;
-        font-size: 13px;
-      }
-      .hero {
-        border: 1px solid #27272a;
-        border-radius: 10px;
-        padding: 22px;
-        background: #18181b;
-      }
-      .eyebrow { color: #a78bfa; font-size: 12px; text-transform: uppercase; letter-spacing: .08em; }
-      .grid {
-        display: grid;
-        grid-template-columns: repeat(3, minmax(0, 1fr));
-        gap: 12px;
-      }
-      .metric {
-        border: 1px solid #27272a;
+        margin: 16px;
+        border: 1px solid #7f1d1d;
         border-radius: 8px;
-        padding: 16px;
-        background: #18181b;
+        background: #1f0f12;
+        color: #fca5a5;
+        font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+        font-size: 12px;
+        white-space: pre-wrap;
+        word-break: break-word;
       }
-      .metric span { display: block; color: #a1a1aa; font-size: 12px; }
-      .metric strong { display: block; margin-top: 6px; font-size: 24px; }
-      ${style}
     </style>
+    <script src="${origin}/preview-runtime/vue.global.prod.js"><\/script>
+    <script src="${origin}/preview-runtime/vue-router.global.prod.js"><\/script>
+    <script src="${origin}/preview-runtime/vue3-sfc-loader.js"><\/script>
   </head>
   <body>
-    ${bridgeScript}
-    <div id="app">${html}</div>
+    <div id="app"></div>
+    <pre id="__preview_error__"></pre>
+    <script>
+      // The sandbox withholds 'allow-same-origin' for isolation, which makes the
+      // real localStorage/sessionStorage throw. Provide in-memory shims so generated
+      // apps that persist state (e.g. a game high score) run instead of crashing.
+      (function () {
+        function memStorage() {
+          var map = {};
+          return {
+            getItem: function (k) { return Object.prototype.hasOwnProperty.call(map, k) ? map[k] : null; },
+            setItem: function (k, v) { map[k] = String(v); },
+            removeItem: function (k) { delete map[k]; },
+            clear: function () { map = {}; },
+            key: function (i) { return Object.keys(map)[i] || null; },
+            get length() { return Object.keys(map).length; },
+          };
+        }
+        try {
+          Object.defineProperty(window, 'localStorage', { value: memStorage(), configurable: true });
+          Object.defineProperty(window, 'sessionStorage', { value: memStorage(), configurable: true });
+        } catch (e) { /* ignore */ }
+      })();
+    <\/script>
+    <script type="application/json" id="__vfs__">${payload}<\/script>
+    <script>
+      (function () {
+        var box = document.getElementById('__preview_error__');
+        function showError(err) {
+          var msg = (err && err.stack) ? err.stack : (err && err.message) ? err.message : String(err);
+          box.style.display = 'block';
+          box.textContent = 'Preview failed to run:\\n\\n' + msg;
+        }
+        window.addEventListener('error', function (e) { showError(e.error || e.message); });
+        window.addEventListener('unhandledrejection', function (e) { showError(e.reason); });
+
+        try {
+          var payload = JSON.parse(document.getElementById('__vfs__').textContent);
+          var files = payload.files;
+          var entry = payload.entry;
+
+          var Vue = window.Vue;
+          var VueRouter = window.VueRouter;
+          var sfc = window['vue3-sfc-loader'];
+          if (!Vue || !sfc) { throw new Error('Preview runtime failed to load. Check /preview-runtime assets.'); }
+
+          // Keep generated routing fully in-memory: internal navigation works,
+          // but nothing touches the URL or escapes the iframe.
+          var routerModule = VueRouter ? Object.assign({}, VueRouter, {
+            createWebHistory: VueRouter.createMemoryHistory,
+            createWebHashHistory: VueRouter.createMemoryHistory,
+          }) : undefined;
+
+          var exts = ['', '.vue', '.ts', '.js', '.mjs', '.json', '.css'];
+          function resolveFile(raw) {
+            var p = String(raw).replace(/^\\.?\\//, '').replace(/^\\/+/, '');
+            var candidates = [];
+            for (var i = 0; i < exts.length; i++) candidates.push(p + exts[i]);
+            candidates.push(p.replace(/\\/?$/, '/index.vue'));
+            candidates.push(p.replace(/\\/?$/, '/index.ts'));
+            candidates.push(p.replace(/\\/?$/, '/index.js'));
+            for (var j = 0; j < candidates.length; j++) {
+              if (files[candidates[j]] != null) return candidates[j];
+            }
+            // Last resort: match by file name regardless of directory.
+            var base = p.split('/').pop();
+            var keys = Object.keys(files);
+            for (var k = 0; k < keys.length; k++) {
+              var kb = keys[k].split('/').pop();
+              if (kb === base) return keys[k];
+              for (var e = 1; e < exts.length; e++) { if (kb === base + exts[e]) return keys[k]; }
+            }
+            return null;
+          }
+
+          // The loader parses '.js' as a SCRIPT (no import/export). Treat JS files
+          // as ES modules so generated import/export works; the '.ts' parser is a
+          // superset that handles plain JS too.
+          function moduleType(ext) {
+            return (ext === '.js' || ext === '.jsx' || ext === '.cjs' || ext === '.mjs') ? '.ts' : ext;
+          }
+
+          var options = {
+            moduleCache: Object.assign({ vue: Vue }, routerModule ? { 'vue-router': routerModule } : {}),
+            getFile: function (url) {
+              var key = resolveFile(url);
+              if (key == null) {
+                // Tolerate a hallucinated import (a file the generator referenced
+                // but never produced): stub it so one bad import doesn't kill the
+                // whole preview.
+                var base = String(url).split('/').pop() || '';
+                var dotI = base.lastIndexOf('.');
+                var ext = dotI > 0 ? base.slice(dotI).toLowerCase() : (/^[A-Z]/.test(base) ? '.vue' : '.js');
+                var stub;
+                if (ext === '.vue') {
+                  stub = '<template><div style="padding:8px;border:1px dashed #52525b;border-radius:6px;color:#a1a1aa;font-size:12px;font-family:monospace">[missing: ' + url + ']</div></template>';
+                } else if (ext === '.json') {
+                  stub = '{}';
+                } else if (ext === '.css') {
+                  stub = '';
+                } else {
+                  stub = 'export default {};';
+                }
+                console.warn('[preview] missing module stubbed:', url);
+                return {
+                  getContentData: function (asBinary) {
+                    return asBinary ? new TextEncoder().encode(stub).buffer : stub;
+                  },
+                  type: moduleType(ext),
+                };
+              }
+              var content = files[key];
+              var dot = key.lastIndexOf('.');
+              var type = dot >= 0 ? key.slice(dot) : '.js';
+              return {
+                getContentData: function (asBinary) {
+                  return asBinary ? new TextEncoder().encode(content).buffer : content;
+                },
+                type: moduleType(type),
+              };
+            },
+            addStyle: function (textContent) {
+              var style = document.createElement('style');
+              style.textContent = textContent;
+              document.head.appendChild(style);
+            },
+            handleModule: function (type, getContentData, path) {
+              if (type === '.json') return JSON.parse(getContentData(false));
+              if (type === '.css') {
+                var style = document.createElement('style');
+                style.textContent = getContentData(false);
+                document.head.appendChild(style);
+                return {};
+              }
+              return undefined;
+            },
+            log: function (type) {
+              if (type === 'error') {
+                var rest = Array.prototype.slice.call(arguments, 1).join(' ');
+                showError(rest);
+              }
+            },
+          };
+
+          sfc.loadModule(entry, options).then(function (mod) {
+            var comp = mod && (mod.default || mod);
+            var isComponent = comp && (typeof comp === 'object' || typeof comp === 'function') &&
+              (comp.render || comp.setup || comp.template || comp.__file || comp.components || comp.data || comp.props);
+            // A self-mounting entry (main.*) mounts itself and exports nothing useful.
+            if (isComponent) {
+              var app = Vue.createApp(comp);
+              app.config.errorHandler = showError;
+              app.mount('#app');
+            }
+          }).catch(showError);
+        } catch (err) {
+          showError(err);
+        }
+      })();
+    <\/script>
   </body>
 </html>`
 }
 
 watch(
-  () => props.code,
-  (code) => {
-    srcdoc.value = code ? buildSrcdoc(code) : ''
-  },
-  { immediate: true },
+  () => [props.files, props.entry],
+  () => buildSrcdoc(),
+  { immediate: true, deep: true },
 )
 </script>
 
 <template>
   <div class="h-full">
-    <div v-if="error" class="p-4 text-red-400 text-sm">
+    <div v-if="empty" class="flex items-center justify-center h-full text-zinc-500 text-sm">
       <AlertCircle class="w-4 h-4 inline mr-2" />
-      {{ error }}
+      No runnable Vue entry found in generated files.
     </div>
     <iframe
       v-else-if="srcdoc"
       :srcdoc="srcdoc"
-      sandbox=""
+      sandbox="allow-scripts allow-forms allow-modals allow-popups"
       class="h-full w-full border-0 bg-zinc-950"
       title="Generated app preview"
     />

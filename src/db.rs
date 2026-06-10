@@ -248,7 +248,7 @@ pub(crate) async fn put_app(pool: &PgPool, user_id: &str, app: &App) -> ApiResul
         r#"
         INSERT INTO apps (id, user_id, data, created_at, updated_at)
         VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (id) DO UPDATE SET data = EXCLUDED.data, updated_at = EXCLUDED.updated_at
+        ON CONFLICT (id) DO UPDATE SET user_id = EXCLUDED.user_id, data = EXCLUDED.data, updated_at = EXCLUDED.updated_at
         "#,
     )
     .bind(&app.id)

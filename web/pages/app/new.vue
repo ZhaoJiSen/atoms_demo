@@ -35,7 +35,7 @@ async function handleCreate() {
   error.value = null
   try {
     const app = await createApp({ idea: idea.value.trim() })
-    router.push(`/app/${app.id}/workspace`)
+    router.push(`/app/${app.id}`)
   } catch (e: any) {
     error.value = e?.message || t('newApp.failed')
   } finally {

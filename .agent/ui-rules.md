@@ -8,9 +8,10 @@ UI 是工具型 SaaS / Developer Tool 工作台，不是营销官网。
 
 风格要求：
 
-- 暗色优先。
+- **纯暗色，不支持亮色**。通过 `plugins/force-dark.client.ts` 强制 color-mode 为 dark，
+  使 Nuxt UI 组件始终用暗色变体；不要引入主题切换。
 - 信息密度适中。
-- 紫色只作为主操作和少量强调色。
+- 紫色（violet，对应 Nuxt UI `primary`）只作为主操作和少量强调色；gray 映射到 zinc。
 - 布局克制、清晰、可扫描。
 - 不使用大面积渐变、装饰图形或无意义动画。
 - 优先使用 Nuxt UI、Tailwind CSS 和 lucide 图标。
@@ -85,39 +86,39 @@ Servers 是运维延伸能力，必须和 App Builder 形成清晰区分。
 
 ## Workspace UI
 
-Workspace 必须展示：
+Workspace（路由 `/app/:id`，常驻首页侧边栏布局）以 Tab 呈现：
+Preview / Files / Pages / API / Models / Spec / Chat。必须展示：
 
-- App title。
-- 用户 idea。
-- 当前状态。
-- Agent steps。
-- Agent messages。
-- 生成结果分区。
-- Preview 入口。
+- App title、用户 idea、当前状态。
+- Agent steps、Agent messages。
+- 生成结果分区（见下）。
 - Retry 或失败说明。
 
-生成结果必须分区展示，不允许堆成一段文本。
+生成结果必须分区展示，不允许堆成一段文本。推荐分区：
+Product Spec、Pages、API、Data Models、File Structure、Preview。
 
-推荐分区：
+### 生成过程 UI（流式，非阻塞）
 
-- Product Spec
-- Pages
-- API
-- Data Models
-- File Structure
-- Preview
+生成走 SSE，过程必须**内联展示，不用遮罩 Modal、不用假定时器**：
+
+- Tab 栏下方常驻一条步骤进度条，步骤状态来自真实 `step` 事件。
+- 生成时自动定位 Files Tab，代码**逐字写入 CodeMirror**；文件树上正在写的文件显示 spinner。
+- 用户点哪个文件看哪个；没点则默认第一个开始流式的文件。规划未回来时显示“思考中”。
+- 完成后自动切到 Preview Tab。
+- 高度约束：工作台每一层用 `min-h-0` / `flex-shrink-0`，长代码只在 CodeMirror 内部滚动，
+  不得把 header 顶塌或溢出隐藏。
 
 ## Preview UI
 
-Preview 是可交互原型，不是静态截图或纯文本说明。
+Preview **直接运行生成的真实应用**（vue3-sfc-loader 在沙箱 iframe 内编译挂载整套文件），
+不是静态截图或纯文本说明，也不再是固定 mock 布局。
 
-必须包含：
+要求：
 
-- 应用标题和描述。
-- 至少两个内容区块。
-- Mock 列表、卡片、表格、表单或统计之一。
-- 至少一个可点击操作。
-- 返回 Workspace 入口。
+- 运行整套 `fileStructure`，应用内部路由可跳转（用 memory history，跳转不影响外层 Atoms）。
+- 文件流式到达时预览逐步构建；编辑代码会触发预览重跑。
+- 缺失/幻觉 import 用占位桩兜底，单个坏文件不得让整个预览失败。
+- `PreviewMockApp.vue` 仅作为无可运行代码时的兜底，不是主路径。
 
 ## 状态反馈
 

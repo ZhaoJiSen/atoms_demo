@@ -13,7 +13,7 @@ pub(super) fn parse_generated_result(response: &str) -> ApiResult<GeneratedResul
 fn parse_ai_json<T: DeserializeOwned>(response: &str) -> ApiResult<T> {
     let json_text = extract_json(response).ok_or(ApiError::Internal("AI response is not JSON"))?;
     let value: Value = serde_json::from_str(&json_text).map_err(|error| {
-        eprintln!("Failed to parse AI JSON: {error}; content: {json_text}");
+        tracing::error!(%error, content = %json_text, "Failed to parse AI JSON");
         ApiError::Internal("Failed to parse AI generated JSON")
     })?;
 
@@ -27,14 +27,14 @@ fn parse_ai_json<T: DeserializeOwned>(response: &str) -> ApiResult<T> {
     let candidate = normalize_generated_result(candidate);
 
     serde_json::from_value(candidate).map_err(|error| {
-        eprintln!("Failed to decode generated result: {error}; content: {json_text}");
+        tracing::error!(%error, content = %json_text, "Failed to decode generated result");
         ApiError::Internal("Failed to decode AI generated app")
     })
 }
 
 pub(super) fn extract_chat_content(body: &str) -> ApiResult<String> {
     let value: Value = serde_json::from_str(body).map_err(|error| {
-        eprintln!("Failed to parse AI response JSON: {error}; body: {body}");
+        tracing::error!(%error, body = %body, "Failed to parse AI response JSON");
         ApiError::Internal("Failed to parse AI response")
     })?;
 
@@ -67,7 +67,7 @@ pub(super) fn extract_chat_content(body: &str) -> ApiResult<String> {
         return Ok(extract_json_from_markdown(&content));
     }
 
-    eprintln!("AI response JSON did not contain usable content: {body}");
+    tracing::error!(body = %body, "AI response JSON did not contain usable content");
     Err(ApiError::Internal("No content from AI response"))
 }
 

@@ -93,6 +93,8 @@
     "readyDesc": "应用已创建，点击按钮开始生成。",
     "generating": "生成中",
     "generatingDesc": "Agent 正在执行，请稍候...",
+    "thinking": "思考中...",
+    "leaveConfirm": "应用正在生成中，确定要离开吗？离开后本次生成会中断，返回时将重新开始。",
     "failed": "生成失败",
     "failedDesc": "生成过程中出现错误。",
     "completed": "生成完成",

@@ -1,6 +1,12 @@
 export default defineNuxtConfig({
   compatibilityDate: '2026-06-05',
   modules: ['@nuxt/ui', '@nuxtjs/i18n', '@nuxtjs/tailwindcss'],
+  // Dark-only app: never follow the OS/browser theme, so Nuxt UI components
+  // (locale switcher, inputs, etc.) always use their dark variants.
+  colorMode: {
+    preference: 'dark',
+    fallback: 'dark',
+  },
   css: ['~/assets/css/main.css', '@xterm/xterm/css/xterm.css'],
   devtools: { enabled: true },
   ssr: false,

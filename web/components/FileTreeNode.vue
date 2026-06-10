@@ -10,6 +10,7 @@ const props = defineProps<{
   node: FileTreeNode
   selectedFile?: string | null
   expandedPaths: string[]
+  streamingPaths?: string[]
   depth?: number
 }>()
 
@@ -19,6 +20,9 @@ const emit = defineEmits<{
 }>()
 
 const isExpanded = computed(() => props.expandedPaths.includes(props.node.path))
+const isWriting = computed(() =>
+  props.node.type === 'file' && (props.streamingPaths || []).includes(props.node.path),
+)
 const paddingLeft = computed(() => `${(props.depth || 0) * 14}px`)
 
 function handleClick() {
@@ -50,6 +54,7 @@ function handleClick() {
       <Folder v-if="node.type === 'directory'" class="w-4 h-4 text-violet-400 mr-1" />
       <File v-else class="w-4 h-4 text-zinc-500 mr-1" />
       <span class="font-mono truncate">{{ node.name }}</span>
+      <Loader2 v-if="isWriting" class="w-3 h-3 ml-auto text-violet-400 animate-spin flex-shrink-0" />
     </UButton>
 
     <div v-if="node.type === 'directory' && isExpanded">
@@ -59,6 +64,7 @@ function handleClick() {
         :node="child"
         :selected-file="selectedFile"
         :expanded-paths="expandedPaths"
+        :streaming-paths="streamingPaths"
         :depth="(depth || 0) + 1"
         @select="emit('select', $event)"
         @toggle="emit('toggle', $event)"

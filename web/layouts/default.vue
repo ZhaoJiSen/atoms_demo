@@ -226,9 +226,9 @@ async function handleDemoLogin() {
     </aside>
 
     <!-- Main Content -->
-    <main class="flex-1 flex flex-col bg-zinc-950">
+    <main class="flex-1 min-h-0 min-w-0 flex flex-col bg-zinc-950">
       <!-- Header -->
-      <header class="border-b border-zinc-800 px-6 h-12 flex items-center justify-between">
+      <header class="border-b border-zinc-800 px-6 h-12 flex-shrink-0 flex items-center justify-between">
         <div class="flex items-center gap-4">
           <UButton to="/" variant="ghost" size="xs" color="gray">
             <Home class="w-4 h-4" />

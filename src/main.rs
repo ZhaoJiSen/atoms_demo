@@ -2,6 +2,7 @@ use std::net::SocketAddr;
 
 use routes::build_router;
 use state::AppState;
+use tracing_subscriber::{EnvFilter, fmt};
 
 mod ai;
 mod auth;
@@ -20,16 +21,21 @@ async fn main() {
     // Load .env file if it exists
     let _ = dotenvy::dotenv();
 
+    // Initialize tracing. Override verbosity with RUST_LOG, e.g.
+    // `RUST_LOG=atoms_demo=debug,tower_http=debug`.
+    fmt()
+        .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| {
+            EnvFilter::new("info,atoms_demo=debug,tower_http=info")
+        }))
+        .init();
+
     let state = match db::connect_from_env().await {
         Ok(pool) => {
-            println!("Connected to PostgreSQL");
+            tracing::info!("Connected to PostgreSQL");
             AppState::postgres(pool)
         }
         Err(e) => {
-            println!(
-                "PostgreSQL not available ({:?}), using in-memory storage",
-                e
-            );
+            tracing::warn!(error = ?e, "PostgreSQL not available, using in-memory storage");
             AppState::memory()
         }
     };
@@ -44,7 +50,7 @@ async fn main() {
         .await
         .expect("failed to bind server port");
 
-    println!("Atoms Demo API listening on http://{addr}");
+    tracing::info!("Atoms Demo API listening on http://{addr}");
 
     axum::serve(listener, app)
         .await

@@ -43,6 +43,7 @@ POST   /api/init
 GET    /api/auth/login
 GET    /api/auth/callback
 POST   /api/auth/logout
+POST   /api/auth/demo
 GET    /api/auth/me
 
 GET    /api/apps
@@ -52,6 +53,7 @@ PATCH  /api/apps/:id
 DELETE /api/apps/:id
 POST   /api/apps/:id/messages
 POST   /api/apps/:id/generate
+GET    /api/apps/:id/generate/stream
 
 GET    /api/notes
 POST   /api/notes
@@ -127,23 +129,50 @@ interface FileNode {
 
 ## App Generation
 
-`POST /api/apps/:id/generate` 当前行为：
+生成有两条接口，前端默认走 SSE 流式那条：
 
-- 如果 App 已是 `generating`，返回 `409`。
-- 如果配置了 AI Settings，调用真实 Chat Completions 风格接口。
-- 如果未配置 AI Settings，使用 mock 生成。
-- 生成 prompt 会带上最近的 conversation messages。
-- App 已有 result 时，会把上一版 result 作为可修订上下文传给 AI。
-- AI 必须返回完整的新版 `GeneratedResult`，而不是局部 diff。
-- AI 响应会被解析为 `GeneratedResult`。
-- 解析器允许 provider 返回以下包裹形式：
-  - 直接返回 `GeneratedResult`
-  - `result`
-  - `generatedResult`
-  - `data`
-  - OpenAI / Mimo 风格 `choices[0].message.content`
-  - Markdown fenced JSON
-  - 文本中夹带的平衡 JSON
+- `POST /api/apps/:id/generate`：同步一次性返回完整 `App`（保留，主要给测试用）。
+- `GET  /api/apps/:id/generate/stream`：SSE 流式分阶段生成（前端 EventSource 走这条）。
+
+两者通用行为：
+
+- 配置了 AI Settings 时调用真实 Chat Completions 风格接口；未配置时使用 mock。
+- 生成会带上最近的 conversation messages（最多 10 条）。
+- App 已有 result 时，把上一版完整 result 作为可修订上下文传给规划阶段。
+- 结果是**完整的新版 `GeneratedResult` 整份覆盖**，不是文件级 diff。
+- 解析器允许 provider 返回多种包裹形式（直接 `GeneratedResult`、`result`、`generatedResult`、
+  `data`、OpenAI/Mimo 风格 `choices[0].message.content`、Markdown fenced JSON、夹带的平衡 JSON）。
+
+`POST /api/apps/:id/generate` 在 App 已是 `generating` 时返回 `409`。
+`GET /api/apps/:id/generate/stream` **不** 返回 409：被中断后卡在 `generating` 的 App 可重新触发。
+
+### SSE 流式分阶段生成
+
+`GET /api/apps/:id/generate/stream` 通过 session cookie 鉴权（EventSource 自动带）。
+后端把生成拆成阶段并以命名 SSE 事件推送：
+
+```txt
+分阶段：
+  规划(Planner)       -> 1 次 LLM 调用：productSpec/pages/apis/dataModels/preview + 文件清单(无代码)
+  逐文件(Engineer)    -> 按依赖分层(基础 .ts → 组件 → 页面/App → 入口 main)，
+                         层内并行(并发上限 4)、层间串行；上层拿到下层已生成的真实代码做上下文
+  整合(Finalize)      -> 组装完整 GeneratedResult 并持久化
+```
+
+事件类型（`event:` 名 + JSON `data:`）：
+
+```txt
+step        { id, status, startedAt?, completedAt? }   # 7 个步骤的真实状态变更
+partial     { productSpec, pages, apis, dataModels, preview }   # 规划结果，先填充各分区 Tab
+manifest    { fileStructure }                          # 完整文件树(无 content)，前端立即渲染树
+file_start  { path }                                   # 某文件开始写入
+file_chunk  { path, delta }                            # 该文件的 token 增量(逐字写入 CodeMirror)
+file_end    { path, type, description, content }        # 该文件完成，落地后触发预览重跑
+done        <App>                                       # 完整最终 App
+fail        { error }                                   # 失败（特意命名 fail，避开 EventSource 原生 error/自动重连）
+```
+
+并行只在层内进行，不同文件的 `file_*` 事件会交错出现，按 `path` 区分。
 
 AI 生成必须返回 Rust 后端可反序列化的字段，不允许缺失或改名。
 
@@ -155,14 +184,15 @@ interface CreateAppMessageRequest {
 }
 ```
 
-轻量多轮流程：
+轻量多轮流程（继续对话）：
 
 ```txt
 POST /api/apps/:id/messages
-POST /api/apps/:id/generate
+GET  /api/apps/:id/generate/stream
 ```
 
-后端会保存用户消息，再根据历史消息和旧 result 重新生成完整结果。
+后端保存用户消息后，规划阶段带上历史消息 + 旧 result 重新规划，再逐文件全量重写、整份覆盖。
+注意：继续对话是**全量重生成**（规划层参考旧结果，生成层不做文件级 patch）。
 
 ## Notes Model
 

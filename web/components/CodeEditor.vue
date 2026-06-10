@@ -17,7 +17,7 @@ const emit = defineEmits<{
 
 const extensions = computed(() => {
   const exts = [oneDark]
-  
+
   switch (props.language) {
     case 'javascript':
     case 'js':
@@ -33,7 +33,7 @@ const extensions = computed(() => {
       exts.push(css())
       break
   }
-  
+
   return exts
 })
 
@@ -47,7 +47,23 @@ const onChange = (value: string) => {
     :model-value="modelValue"
     :extensions="extensions"
     :disabled="readOnly"
-    :style="{ height: '100%', minHeight: '300px' }"
+    :style="{ height: '100%' }"
     @update:model-value="onChange"
   />
 </template>
+
+<!--
+  Make the editor fill its container and scroll INTERNALLY. Without forcing
+  `.cm-editor` to 100% height, CodeMirror grows to the full content height,
+  blowing out the layout (and getting clipped by an ancestor's overflow) for
+  long files.
+-->
+<style scoped>
+:deep(.cm-editor) {
+  height: 100%;
+}
+
+:deep(.cm-scroller) {
+  overflow: auto;
+}
+</style>

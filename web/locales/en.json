@@ -93,6 +93,8 @@
     "readyDesc": "App created. Click the button to start generation.",
     "generating": "Generating",
     "generatingDesc": "Agent is executing, please wait...",
+    "thinking": "Thinking...",
+    "leaveConfirm": "Generation is in progress. Leave anyway? This run will be interrupted and restarted when you return.",
     "failed": "Generation failed",
     "failedDesc": "An error occurred during generation.",
     "completed": "Generation complete",
