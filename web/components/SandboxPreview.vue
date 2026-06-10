@@ -10,6 +10,7 @@ const props = defineProps<{
 
 const srcdoc = ref('')
 const empty = ref(false)
+const iframeReady = ref(false)
 
 // Pick the module that should bootstrap the app.
 // Prefer a self-mounting entry (main.*) so router/plugin wiring is preserved,
@@ -240,9 +241,14 @@ function buildSrcdoc() {
               app.config.errorHandler = showError;
               app.mount('#app');
             }
-          }).catch(showError);
+            window.parent.postMessage({ type: '__preview_ready__' }, '*');
+          }).catch(function (err) {
+            showError(err);
+            window.parent.postMessage({ type: '__preview_ready__' }, '*');
+          });
         } catch (err) {
           showError(err);
+          window.parent.postMessage({ type: '__preview_ready__' }, '*');
         }
       })();
     <\/script>
@@ -252,26 +258,62 @@ function buildSrcdoc() {
 
 watch(
   () => [props.files, props.entry],
-  () => buildSrcdoc(),
+  () => {
+    iframeReady.value = false
+    buildSrcdoc()
+  },
   { immediate: true, deep: true },
 )
+
+function onPreviewMessage(event: MessageEvent) {
+  if (event.data?.type === '__preview_ready__') {
+    iframeReady.value = true
+  }
+}
+
+onMounted(() => window.addEventListener('message', onPreviewMessage))
+onBeforeUnmount(() => window.removeEventListener('message', onPreviewMessage))
 </script>
 
 <template>
-  <div class="h-full">
+  <div class="h-full relative">
     <div v-if="empty" class="flex items-center justify-center h-full text-zinc-500 text-sm">
       <AlertCircle class="w-4 h-4 inline mr-2" />
       No runnable Vue entry found in generated files.
     </div>
-    <iframe
-      v-else-if="srcdoc"
-      :srcdoc="srcdoc"
-      sandbox="allow-scripts allow-forms allow-modals allow-popups"
-      class="h-full w-full border-0 bg-zinc-950"
-      title="Generated app preview"
-    />
+    <template v-else-if="srcdoc">
+      <iframe
+        :srcdoc="srcdoc"
+        sandbox="allow-scripts allow-forms allow-modals allow-popups"
+        class="h-full w-full border-0 bg-zinc-950"
+        title="Generated app preview"
+      />
+      <Transition name="fade">
+        <div
+          v-if="!iframeReady"
+          class="absolute inset-0 flex flex-col items-center justify-center bg-zinc-950/90 z-10"
+        >
+          <Loader2 class="w-6 h-6 text-violet-400 animate-spin mb-3" />
+          <p class="text-xs text-zinc-500">Compiling preview…</p>
+        </div>
+      </Transition>
+    </template>
     <div v-else class="flex items-center justify-center h-full text-zinc-500">
       <Loader2 class="w-6 h-6 animate-spin" />
+    </div>
+  </div>
+</template>
+
+<style scoped>
+.fade-enter-active,
+.fade-leave-active {
+  transition: opacity 0.25s ease;
+}
+.fade-enter-from,
+.fade-leave-to {
+  opacity: 0;
+}
+</style>
     </div>
   </div>
 </template>
