@@ -238,6 +238,13 @@ The app runs in a minimal sandbox that provides ONLY the `vue` and `vue-router` 
 - When you DO import another project file, use the EXACT exported name and shape the plan
   implies; a mismatched import crashes at runtime. Prefer passing data to child components via
   props over sharing mutable state across files.
+- Initialize ALL reactive state with a concrete default value at declaration, BEFORE the template
+  reads it (e.g. `const game = reactive({ gridSize: 20, score: 0, snake: [] })`). The template must
+  never read a property of something that could be undefined; if a value may be absent, guard it
+  with `v-if`, optional chaining, or a default. Runtime errors like "Cannot read properties of
+  undefined" mean the template rendered before its data existed — do not let that happen.
+- A child component must declare every prop it uses via `defineProps`, with sensible defaults, and
+  must not assume a parent passed something it did not.
 - Keep the file focused and reasonably concise; do not pad it with unnecessary boilerplate.
 - Only import from the provided project files or from 'vue' / 'vue-router'. NEVER import a file
   that is not in the provided list. If you need a small helper or component that is not listed,

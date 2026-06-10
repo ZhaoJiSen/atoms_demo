@@ -70,16 +70,26 @@ function buildSrcdoc() {
       }
       #__preview_error__ {
         display: none;
-        padding: 16px;
-        margin: 16px;
-        border: 1px solid #7f1d1d;
-        border-radius: 8px;
+        position: fixed;
+        left: 0; right: 0; bottom: 0;
+        max-height: 50%;
+        overflow: auto;
+        padding: 12px 16px;
+        border-top: 2px solid #b91c1c;
         background: #1f0f12;
         color: #fca5a5;
         font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
         font-size: 12px;
         white-space: pre-wrap;
         word-break: break-word;
+        z-index: 99999;
+      }
+      #__preview_error__::before {
+        content: "⚠ Generated app error";
+        display: block;
+        font-weight: 700;
+        color: #f87171;
+        margin-bottom: 6px;
       }
     </style>
     <script src="${origin}/preview-runtime/vue.global.prod.js"><\/script>
@@ -233,13 +243,38 @@ function buildSrcdoc() {
 
           sfc.loadModule(entry, options).then(function (mod) {
             var comp = mod && (mod.default || mod);
-            var isComponent = comp && (typeof comp === 'object' || typeof comp === 'function') &&
-              (comp.render || comp.setup || comp.template || comp.__file || comp.components || comp.data || comp.props);
-            // A self-mounting entry (main.*) mounts itself and exports nothing useful.
-            if (isComponent) {
+            // If the entry is a .vue it IS a component — mount it directly. A
+            // self-mounting entry (main.*) returns nothing useful, so only treat
+            // a non-.vue module as a component when it clearly looks like one.
+            var entryIsVue = /\.vue$/i.test(entry);
+            var isComponent = entryIsVue || (comp && (typeof comp === 'object' || typeof comp === 'function') &&
+              (comp.render || comp.setup || comp.template || comp.__file || comp.components || comp.data || comp.props));
+            if (isComponent && comp) {
               var app = Vue.createApp(comp);
-              app.config.errorHandler = showError;
-              app.mount('#app');
+              // Surface runtime render errors as a visible banner instead of a
+              // blank screen, and keep the rest of the app alive where possible.
+              app.config.errorHandler = function (err) { showError(err); };
+              try {
+                app.mount('#app');
+              } catch (mountErr) {
+                showError(mountErr);
+              }
+            }
+            // If main.* was the entry but nothing actually mounted, fall back to a
+            // root component so the preview isn't silently blank.
+            if (!entryIsVue) {
+              var hostEmpty = !document.getElementById('app').hasChildNodes();
+              if (hostEmpty) {
+                var fallback = ['src/App.vue','App.vue','src/pages/index.vue','pages/index.vue']
+                  .filter(function (p) { return files[p] != null; })[0];
+                if (fallback) {
+                  return sfc.loadModule(fallback, options).then(function (m) {
+                    var c = m && (m.default || m);
+                    try { Vue.createApp(c).mount('#app'); } catch (e) { showError(e); }
+                    window.parent.postMessage({ type: '__preview_ready__' }, '*');
+                  });
+                }
+              }
             }
             window.parent.postMessage({ type: '__preview_ready__' }, '*');
           }).catch(function (err) {
